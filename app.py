@@ -8,7 +8,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 BRANDS = {'ontops':'Ontops','ontops-dr':'Ontops DR','link4m':'Link4M','funlink':'FunLink','toplinks':'TopLinks','gtraffic':'GTraffic','gtraffic-dr':'GTraffic DR','layma':'LayMa'}
-VERSION = '3.0'
+VERSION = '4.0'
 SLOTS = threading.BoundedSemaphore(2)
 DOMAIN_BRANDS = {'toplinks.io':'TopLinks','ontops.link':'Ontops','link4m.com':'Link4M','funlink.io':'FunLink','yeumoney.com':'YeuMoney','yeulink.com':'YeuLink','synurl.com':'SynURL','linktot.net':'LinkTot','gtraffic.io':'GTraffic','layma.net':'LayMa','linkvertise.com':'Linkvertise','lootlabs.gg':'LootLabs','loot-link.com':'LootLabs','work.ink':'Work.ink','adf.ly':'AdFly'}
 def platform(url):
@@ -19,11 +19,15 @@ PASSWORD = os.environ.get('APP_PASSWORD','')
 API_URL = os.environ.get('BYPASS_BASE_URL','')
 API_KEY = os.environ.get('BYPASS_API_KEY','')
 ALLOW_CODE = os.environ.get('ALLOW_CODE_API','0')=='1'
+def detect_code_brand(url):
+    name=platform(url).lower()
+    return next((key for key,label in BRANDS.items() if label.lower()==name),None)
+
 def api_ready():
     return bool(API_URL and API_KEY and PASSWORD)
 def capability():
     return {'version':VERSION,'api':api_ready(),'code':api_ready() and ALLOW_CODE,
-            'brands':BRANDS,'locked':bool(PASSWORD),'crowd':True,'manual_browser':True,'browser':browser_probe.configured()}
+            'brands':BRANDS,'locked':bool(PASSWORD),'crowd':True,'manual_browser':True,'code_brands':{domain:detect_code_brand('https://'+domain) for domain in DOMAIN_BRANDS},'browser':browser_probe.configured()}
 
 
 class LinkError(Exception): pass
@@ -175,6 +179,28 @@ def validate_public_url(url):
     u,host=parse_url(url)
     public_ip(host,443 if u.scheme=='https' else 80)
 
+def request_code(url,brand=None,destination=None,consent=False):
+    started=time.monotonic()
+    if brand in (None,'','auto'):
+        brand=detect_code_brand(url)
+    if brand not in BRANDS:
+        return {'status':'manual','kind':'code','message':'Chọn nền tảng lấy mã phù hợp; chưa nhận diện được từ URL.','original_url':url}
+    result={'status':'manual','kind':'code','platform':BRANDS[brand],'original_url':url}
+    if not api_ready() or not ALLOW_CODE:
+        return dict(result,message='Chưa bật API lấy mã trên hosting. Không có mã xác nhận; hãy hoàn thành trên trang gốc.',trace=[{'engine':'Fetch Code','status':'not_configured'}])
+    if not consent:
+        raise LinkError('Cần xác nhận hạn mức trước khi lấy mã.')
+    target=destination or url
+    validate_public_url(target)
+    try:
+        received=sdk_request(target,'code',brand)
+    except Exception:
+        return dict(result,message='API chưa trả được mã. Có thể cần URL trang đích của nhiệm vụ hoặc kiểm tra quyền và hạn mức. Không tự thử lại.',trace=[{'engine':'Fetch Code','status':'unavailable'}])
+    code=received.get('code')
+    if received.get('status')=='resolved' and isinstance(code,str) and code.strip() and len(code)<=200 and not any(ord(ch)<32 for ch in code):
+        return dict(result,status='resolved',code=code,provider='VuotLink API',message='Đã nhận mã từ API; chưa xác minh mã được trang nhiệm vụ chấp nhận.',elapsed_ms=round((time.monotonic()-started)*1000),trace=[{'engine':'Fetch Code','status':'code_received'}])
+    return dict(result,message='API không trả mã. Nếu đang dùng link rút gọn, hãy cung cấp URL trang đích của nhiệm vụ.',trace=[{'engine':'Fetch Code','status':'not_found'}])
+
 def sdk_request(url,mode,brand):
     if not api_ready(): raise LinkError('Chưa cấu hình API nhà cung cấp và mật khẩu ứng dụng.')
     if mode=='code' and not ALLOW_CODE: raise LinkError('API lấy mã chưa được chủ hosting cho phép sử dụng; có thể phát sinh phí.')
@@ -185,7 +211,7 @@ def sdk_request(url,mode,brand):
             if brand not in BRANDS: raise LinkError('Chọn đúng nền tảng lấy mã.')
             result=client.fetch_code(url,brand,source='live')
             code=getattr(result,'code',None)
-            if not code: return {'status':'manual','message':'API không trả về mã.'}
+            if not isinstance(code,(str,int)) or isinstance(code,bool) or not str(code).strip(): return {'status':'manual','message':'API không trả về mã.'}
             return {'status':'resolved','code':str(code),'message':'API đã trả mã; chưa xác minh việc sử dụng mã.'}
         result=client.resolve(url,max_hops=5,is_free=True,auto_solve_captcha=False)
         final=getattr(result,'final_url',None)
@@ -223,7 +249,10 @@ class Handler(BaseHTTPRequestHandler):
             data=json.loads(self.rfile.read(size)); url=data.get('url','').strip(); mode=data.get('mode','auto')
             parse_url(url)
             if mode not in ('auto','redirect','sdk','code','browser'): raise LinkError('Chế độ không hợp lệ.')
-            if mode=='code' and data.get('accept_cost') is not True: raise LinkError('Cần xác nhận hạn mức trước khi lấy mã.')
+            if mode=='code':
+                destination=data.get('destination') or None
+                if destination: parse_url(destination)
+                return self.send(200,request_code(url,data.get('brand'),destination,data.get('accept_cost') is True))
             result=resolve_auto(url,data.get('share') is True,data.get('provider') is True) if mode=='auto' else resolve_redirect(url) if mode=='redirect' else browser_probe.probe(url,validate_public_url) if mode=='browser' else sdk_request(url,mode,data.get('brand'))
             self.send(200,result)
         except LinkError as e: self.send(400,{'status':'error','message':str(e)})
