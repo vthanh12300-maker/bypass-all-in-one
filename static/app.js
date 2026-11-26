@@ -8,7 +8,7 @@ fetch('/api/config').then(r=>{if(!r.ok)throw Error();return r.json();}).then(c=>
  config=c;$('apistatus').textContent='V'+c.version+' · '+(c.api?'API đã cấu hình, chưa xác nhận kết nối live.':'Chưa cấu hình API Việt Nam. Chế độ kiểm tra miễn phí và mở trình duyệt vẫn khả dụng.');
  $('providerbox').hidden=!c.api;
  for(const [id,name] of Object.entries(c.brands||{})){const o=document.createElement('option');o.value=id;o.textContent=name;$('brand').append(o);const s=document.createElement('span');s.className='chip';s.textContent=name;$('chips').append(s);}
- for(const o of $('mode').options){if(o.value==='sdk'){o.disabled=!c.api;if(c.api)o.textContent='API miễn phí';}if(o.value==='code'){o.disabled=!c.code;if(c.code)o.textContent='API lấy mã (có thể dùng hạn mức)';}}
+ for(const o of $('mode').options){if(o.value==='browser'){o.disabled=!c.browser;if(c.browser)o.textContent='Playwright · kiểm tra bằng trình duyệt';}if(o.value==='sdk'){o.disabled=!c.api;if(c.api)o.textContent='API miễn phí';}if(o.value==='code'){o.disabled=!c.code;if(c.code)o.textContent='API lấy mã (có thể dùng hạn mức)';}}
  modeChange();
 }).catch(()=>{$('apistatus').textContent='Không tải được cấu hình máy chủ. Có thể dùng mở trình duyệt.';});
 $('mode').addEventListener('change',modeChange);
