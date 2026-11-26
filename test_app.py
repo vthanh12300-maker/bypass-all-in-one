@@ -62,4 +62,33 @@ class AutoTests(unittest.TestCase):
     def test_private_query_not_shared(self,ip):
         self.assertIsNone(app.crowd_lookup('https://example.com/a?token=secret'))
         ip.assert_not_called()
+class V3Tests(unittest.TestCase):
+    @patch('app.api_ready',return_value=False)
+    @patch('app.response_headers',return_value=(403,None))
+    def test_trace_missing_provider(self,_,ready):
+        r=app.resolve_auto('https://ontops.link/a',provider=True)
+        self.assertEqual(r['status'],'manual')
+        self.assertEqual(r['platform'],'Ontops')
+        self.assertEqual(r['trace'][-1]['status'],'not_configured')
+    @patch('app.sdk_request',return_value={'status':'resolved','url':'https://example.org/final','message':'test'})
+    @patch('app.api_ready',return_value=True)
+    @patch('app.response_headers',return_value=(403,None))
+    def test_provider_opt_in(self,_,ready,sdk):
+        r=app.resolve_auto('https://ontops.link/a')
+        sdk.assert_not_called()
+        self.assertEqual(r['status'],'manual')
+        r=app.resolve_auto('https://ontops.link/a',provider=True)
+        sdk.assert_called_once_with('https://ontops.link/a','sdk',None)
+        self.assertEqual(r['status'],'resolved')
+        self.assertEqual(r['trace'][-1]['engine'],'API miễn phí')
+    @patch('app.api_ready',return_value=True)
+    @patch('app.ALLOW_CODE',False)
+    @patch('app.public_ip',return_value='93.184.216.34')
+    def test_code_disabled(self,ip,ready):
+        # Reject before trying to call a provider.
+        with self.assertRaises(app.LinkError): app.sdk_request('https://example.org','code','ontops')
+    @patch.dict('os.environ',{'BROWSER_WS_ENDPOINT':'','BROWSER_EGRESS_ISOLATED':'0'})
+    def test_browser_disabled(self):
+        self.assertFalse(app.browser_probe.configured())
+        self.assertEqual(app.browser_probe.probe('https://example.org',lambda u:None)['status'],'manual')
 if __name__=='__main__': unittest.main()
