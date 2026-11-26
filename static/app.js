@@ -3,7 +3,7 @@ const $=id=>document.getElementById(id);
 let copied='',config=null,history=[];
 function safeURL(s){try{const u=new URL(s);return ['https:','http:'].includes(u.protocol)&&!u.username&&!u.password?u.href:null;}catch{return null;}}
 function link(id,url,label){const el=$(id),safe=safeURL(url);el.hidden=!safe;if(safe){el.href=safe;el.textContent=label;}else el.removeAttribute('href');}
-function modeChange(){const m=$('mode').value;$('run').textContent=m==='code'?'Lấy mã xác nhận':'Xử lý link';$('cost').disabled=!config?.code;$('codeapi').textContent=config?.code?'API lấy mã đã được bật, chưa xác minh kết nối live.':'API lấy mã chưa được bật. Chỉ có thể nhận mã từ trang gốc.';$('brands').hidden=m!=='code';$('advanced').hidden=m!=='auto';$('lock').hidden=m==='manual'||!config?.locked;}
+function modeChange(){const m=$('mode').value;$('run').textContent=m==='code'?'Lấy mã xác nhận':'Xử lý link';$('cost').disabled=!config?.code;$('codeapi').textContent=config?.code?'API lấy mã đã được bật, chưa xác minh kết nối live.':'API lấy mã chưa được bật. Chỉ có thể nhận mã từ trang gốc.';$('brands').hidden=m!=='code';$('advanced').hidden=m!=='auto';$('lock').hidden=!(config?.provider_locked&&(['code','sdk','browser'].includes(m)||(m==='auto'&&$('provider').checked)));}
 fetch('/api/config').then(r=>{if(!r.ok)throw Error();return r.json();}).then(c=>{
  config=c;$('apistatus').textContent='V'+c.version+' · '+(c.api?'API đã cấu hình, chưa xác nhận kết nối live.':'Chưa cấu hình API Việt Nam. Chế độ kiểm tra miễn phí và mở trình duyệt vẫn khả dụng.');
  $('providerbox').hidden=!c.api;
@@ -19,7 +19,7 @@ function renderHistory(){$('history').replaceChildren();for(const h of history){
 $('clearhistory').onclick=()=>{history=[];renderHistory();};
 function manual(url){$('manual').hidden=false;link('original',url,'Mở trang gốc trên trình duyệt');}
 function render(d,url){$('state').textContent=d.status==='resolved'?(d.code?'Đã nhận mã xác nhận':'Có link đích'):d.status==='candidate'?'Đích tham khảo — chưa xác minh':d.status==='manual'?'Cần hoàn thành trên trang gốc':'Không xử lý được';
- $('codepanel').hidden=!(d.kind==='code'&&d.status==='resolved'&&d.code);$('codevalue').textContent=$('codepanel').hidden?'':d.code;
+ $('codepanel').hidden=!(d.kind==='code'&&d.status==='resolved'&&d.code);$('codevalue').textContent=$('codepanel').hidden?'':d.code;$('codettl').textContent=d.workflow?.code_ttl_seconds!=null?'Thời hạn tham khảo theo nền tảng: '+d.workflow.code_ttl_seconds+' giây (không phải thời gian còn lại).':'';
  $('output').textContent=[d.platform?'Nền tảng: '+d.platform:'',d.message,d.code&&$('codepanel').hidden?'Mã: '+d.code:'',d.url?'URL: '+d.url:''].filter(Boolean).join('\n');
  $('steps').replaceChildren();$('trace').hidden=!d.trace?.length;
  const labels={resolved:'Có đích',manual:'Chưa hoàn tất',candidate:'Có đích tham khảo',not_found:'Không tìm thấy',code_received:'Đã nhận mã',not_configured:'Chưa cấu hình',unavailable:'Không khả dụng'};
@@ -32,7 +32,7 @@ function render(d,url){$('state').textContent=d.status==='resolved'?(d.code?'Đ�
 $('form').addEventListener('submit',async e=>{e.preventDefault();const url=safeURL($('url').value.trim()),mode=$('mode').value;if(!url){$('hint').textContent='Nhập URL HTTP/HTTPS hợp lệ.';return;}if(mode==='code'&&config?.code&&!$('cost').checked){$('hint').textContent='Xác nhận hạn mức API trước khi lấy mã.';return;}
  $('hint').textContent='';$('run').disabled=true;$('result').hidden=false;$('state').textContent='Đang xử lý…';$('output').textContent='';$('copy').hidden=true;$('copy').textContent='Sao chép kết quả';$('open').hidden=true;$('trace').hidden=true;$('codepanel').hidden=true;$('codevalue').textContent='';$('manual').hidden=true;$('manualcode').value='';$('codestate').textContent='';copied='';
  try{if(mode==='manual'){render({status:'manual',message:'Sử dụng phiên Chrome/Firefox của bạn để hoàn thành nhiệm vụ.'},url);return;}
- const r=await fetch('/api/resolve',{method:'POST',headers:{'Content-Type':'application/json','X-App-Password':$('password').value},body:JSON.stringify({url,mode,brand:$('brand').value,share:$('share').checked,provider:$('provider').checked,destination:$('destination').value.trim(),accept_cost:$('cost').checked})});const d=await r.json();render(d,url);
+ const r=await fetch('/api/resolve',{method:'POST',headers:{'Content-Type':'application/json','X-Provider-Password':$('password').value},body:JSON.stringify({url,mode,brand:$('brand').value,share:$('share').checked,provider:$('provider').checked,destination:$('destination').value.trim(),accept_cost:$('cost').checked})});const d=await r.json();render(d,url);
  }catch(err){render({status:'error',message:'Không kết nối được backend. Có thể mở trang gốc.'},url);}finally{$('run').disabled=false;}
 });
 async function copy(value,status){if(!value){status.textContent='Chưa có dữ liệu để sao chép.';return;}try{await navigator.clipboard.writeText(value);status.textContent='Đã sao chép';}catch{status.textContent='Nhấn giữ dữ liệu để sao chép.';}}
@@ -40,3 +40,6 @@ $('copy').onclick=()=>copy(copied,$('copy'));
 $('copycode').onclick=()=>copy($('manualcode').value.trim(),$('codestate'));
 
 modeChange();
+
+$('provider').addEventListener('change',modeChange);
+$('preflight').onclick=async()=>{const url=safeURL($('url').value.trim());if(!url){$('preflightresult').textContent='Nhập link hợp lệ trước.';return;}const b=$('preflight');b.disabled=true;$('preflightresult').textContent='Đang kiểm tra…';try{const r=await fetch('/api/code/preflight',{method:'POST',headers:{'Content-Type':'application/json','X-Provider-Password':$('password').value},body:JSON.stringify({url,brand:$('brand').value})});const d=await r.json();const w=d.workflow;$('preflightresult').textContent=[d.platform,d.message,w?.price!=null?'Giá workflow tham khảo: '+w.price:null,w?.code_ttl_seconds!=null?'TTL tham khảo: '+w.code_ttl_seconds+' giây':null,w?.has_captcha?'Có bước CAPTCHA':null].filter(Boolean).join(' · ');if(d.status==='ready'&&d.brand&&[...$('brand').options].some(o=>o.value===d.brand))$('brand').value=d.brand;}catch{$('preflightresult').textContent='Không kết nối được backend.';}finally{b.disabled=false;}};
