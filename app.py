@@ -2,6 +2,7 @@ import os, json, socket, ssl, http.client, ipaddress, hmac, threading, time
 from urllib.parse import urlsplit, urljoin, urlunsplit, urlencode
 from html.parser import HTMLParser
 import re
+from collections import deque
 import browser_probe
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -10,6 +11,15 @@ ROOT = Path(__file__).parent
 BRANDS = {'ontops':'Ontops','ontops-dr':'Ontops DR','link4m':'Link4M','funlink':'FunLink','toplinks':'TopLinks','gtraffic':'GTraffic','gtraffic-dr':'GTraffic DR','layma':'LayMa'}
 VERSION = '5.0'
 SLOTS = threading.BoundedSemaphore(2)
+PUBLIC_CALLS=deque()
+PUBLIC_LOCK=threading.Lock()
+def public_allowed():
+    now=time.monotonic()
+    with PUBLIC_LOCK:
+        while PUBLIC_CALLS and now-PUBLIC_CALLS[0]>=60: PUBLIC_CALLS.popleft()
+        if len(PUBLIC_CALLS)>=20: return False
+        PUBLIC_CALLS.append(now)
+        return True
 DOMAIN_BRANDS = {'toplinks.io':'TopLinks','ontops.link':'Ontops','link4m.com':'Link4M','funlink.io':'FunLink','yeumoney.com':'YeuMoney','yeulink.com':'YeuLink','synurl.com':'SynURL','linktot.net':'LinkTot','gtraffic.io':'GTraffic','layma.net':'LayMa','linkvertise.com':'Linkvertise','lootlabs.gg':'LootLabs','loot-link.com':'LootLabs','work.ink':'Work.ink','adf.ly':'AdFly'}
 def platform(url):
     _,host=parse_url(url)
@@ -218,7 +228,7 @@ def preflight_code(url,brand=None):
         return dict(result,message=provider_error(exc))
     actual=meta['name']
     if actual in BRANDS:
-        if selected and selected!=actual:
+        if brand not in (None,'','auto') and selected and selected!=actual:
             return dict(result,message='Nền tảng đã chọn không khớp dữ liệu nhà cung cấp.',workflow=meta)
         selected=actual
     if selected not in BRANDS:
@@ -230,25 +240,20 @@ def preflight_code(url,brand=None):
 
 def request_code(url,brand=None,destination=None,consent=False):
     started=time.monotonic()
-    if brand in (None,'','auto'):
-        brand=detect_code_brand(url)
-        if not brand and api_ready() and ALLOW_CODE:
-            if not consent: raise LinkError('Cần xác nhận hạn mức trước khi lấy mã.')
-            pre=preflight_code(url)
-            if pre.get('status')=='ready': brand=pre['brand']
-    if brand not in BRANDS:
-        return {'status':'manual','kind':'code','message':'Chọn nền tảng lấy mã phù hợp; chưa nhận diện được từ URL.','original_url':url}
-    result={'status':'manual','kind':'code','platform':BRANDS[brand],'original_url':url}
+    requested=brand
+    selected=detect_code_brand(url) if brand in (None,'','auto') else brand
+    result={'status':'manual','kind':'code','platform':BRANDS.get(selected,platform(url)),'original_url':url}
     if not api_ready() or not ALLOW_CODE:
         return dict(result,message='Chưa bật API lấy mã trên hosting. Không có mã xác nhận; hãy hoàn thành trên trang gốc.',trace=[{'engine':'Fetch Code','status':'not_configured'}])
     if not consent:
         raise LinkError('Cần xác nhận hạn mức trước khi lấy mã.')
     target=destination or url
     validate_public_url(target)
-    # The workflow is identified from the short link, not the optional task destination.
-    pre=preflight_code(url,brand)
+    pre=preflight_code(url,requested)
     if pre.get('status')!='ready':
         return dict(result,message=pre['message'],trace=[{'engine':'Workflow','status':'manual'}])
+    brand=pre['brand']
+    result['platform']=BRANDS[brand]
     try:
         received=sdk_request(target,'code',brand)
     except Exception as exc:
@@ -308,6 +313,8 @@ class Handler(BaseHTTPRequestHandler):
             uses_provider=(route=='/api/code/preflight' or mode in ('sdk','code','browser') or (mode=='auto' and data.get('provider') is True))
             if uses_provider and PASSWORD and not hmac.compare_digest(self.headers.get('X-Provider-Password','').encode(),PASSWORD.encode()):
                 return self.send(401,{'status':'error','message':'API riêng yêu cầu xác thực; chế độ miễn phí không cần mật khẩu.'})
+            if not (uses_provider and PASSWORD) and not public_allowed():
+                return self.send(429,{'status':'error','message':'Đã đạt giới hạn 20 yêu cầu/phút cho web công khai.'})
             if route=='/api/code/preflight':
                 return self.send(200,preflight_code(url,data.get('brand')))
             if mode not in ('auto','redirect','sdk','code','browser'): raise LinkError('Chế độ không hợp lệ.')
