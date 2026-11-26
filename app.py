@@ -177,11 +177,11 @@ def validate_public_url(url):
 
 def sdk_request(url,mode,brand):
     if not api_ready(): raise LinkError('Chưa cấu hình API nhà cung cấp và mật khẩu ứng dụng.')
+    if mode=='code' and not ALLOW_CODE: raise LinkError('API lấy mã chưa được chủ hosting cho phép sử dụng; có thể phát sinh phí.')
     u,host=parse_url(url); public_ip(host,443 if u.scheme=='https' else 80)
     from bypass_vuotlink_sdk import BypassVuotLink
     with BypassVuotLink(base_url=API_URL,api_key=API_KEY,timeout=55.0) as client:
         if mode=='code':
-            if not ALLOW_CODE: raise LinkError('API lấy mã chưa được chủ hosting cho phép sử dụng; có thể phát sinh phí.')
             if brand not in BRANDS: raise LinkError('Chọn đúng nền tảng lấy mã.')
             result=client.fetch_code(url,brand,source='live')
             code=getattr(result,'code',None)
