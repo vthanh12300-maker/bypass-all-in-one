@@ -91,4 +91,40 @@ class V3Tests(unittest.TestCase):
     def test_browser_disabled(self):
         self.assertFalse(app.browser_probe.configured())
         self.assertEqual(app.browser_probe.probe('https://example.org',lambda u:None)['status'],'manual')
+class V4CodeTests(unittest.TestCase):
+    def test_detect_brand(self):
+        self.assertEqual(app.detect_code_brand('https://ontops.link/a'),'ontops')
+        self.assertEqual(app.detect_code_brand('https://toplinks.io/a'),'toplinks')
+        self.assertIsNone(app.detect_code_brand('https://ontops.link.example.org/a'))
+    @patch('app.api_ready',return_value=False)
+    @patch('app.sdk_request')
+    def test_unconfigured(self,sdk,ready):
+        r=app.request_code('https://ontops.link/a')
+        self.assertEqual(r['kind'],'code')
+        self.assertEqual(r['status'],'manual')
+        self.assertNotIn('code',r)
+        sdk.assert_not_called()
+    @patch('app.api_ready',return_value=True)
+    @patch('app.ALLOW_CODE',True)
+    @patch('app.validate_public_url')
+    @patch('app.sdk_request',return_value={'status':'resolved','code':'00123'})
+    def test_exact_code_and_destination(self,sdk,validate,ready):
+        r=app.request_code('https://toplinks.io/a',destination='https://example.org/task',consent=True)
+        sdk.assert_called_once_with('https://example.org/task','code','toplinks')
+        self.assertEqual(r['code'],'00123')
+        self.assertEqual(r['status'],'resolved')
+    @patch('app.api_ready',return_value=True)
+    @patch('app.ALLOW_CODE',True)
+    @patch('app.sdk_request')
+    def test_consent(self,sdk,ready):
+        with self.assertRaises(app.LinkError): app.request_code('https://ontops.link/a')
+        sdk.assert_not_called()
+    @patch('app.api_ready',return_value=True)
+    @patch('app.ALLOW_CODE',True)
+    @patch('app.validate_public_url')
+    @patch('app.sdk_request',return_value={'status':'resolved','url':'https://example.org'})
+    def test_url_not_code(self,sdk,validate,ready):
+        r=app.request_code('https://ontops.link/a',consent=True)
+        self.assertEqual(r['status'],'manual')
+        self.assertNotIn('code',r)
 if __name__=='__main__': unittest.main()
