@@ -15,3 +15,10 @@ Cần nhà cung cấp tương thích bypass-vuotlink-sdk, base URL thật và AP
 
 ## Giới hạn
 Không xử lý JS/form/CAPTCHA bằng redirect thường, không khẳng định có mã nếu API chưa trả mã; không thay thế kiểm tra an toàn link. Chặn IP private, cổng tùy ý, kiểm tra từng redirect, pin IP DNS khi kết nối. API bên thứ ba cần tự bảo vệ SSRF, xác thực và hạn mức; chỉ dùng dịch vụ đáng tin. Server đơn giản cho thử nghiệm cá nhân, không phải public production; Render free có sleep/quota. Không lưu URL trên ứng dụng, host/API ngoài có thể ghi log. Không tự gửi mã hoàn thành nhiệm vụ.
+
+## V2
+- Auto mode identifies known platforms, follows HTTP redirects and published HTML meta refresh instructions with the existing public-IP checks.
+- Optional read-only FastForward Crowd query (https://fastforwardteam.github.io/serverdocs/). Off by default; sends only domain and path for links without query/fragment. Community results are unverified candidates, not successful code extraction. Does not contribute or retry verification-required responses.
+- SDK is still optional and requires authorized API credentials. No external API charges were enabled. The automatic mode does not call paid SDK operations.
+- Browser userscripts and unrestricted curl-based third-party scripts are not installed on the server. For 403 or unresolved task links, use the original website or a configured provider.
+- Health endpoint includes version 2.0. Deployment build runs regression tests.
