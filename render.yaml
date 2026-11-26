@@ -3,9 +3,6 @@ services:
     name: bypass-all-in-one
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python -m unittest discover -v
     startCommand: python app.py
     healthCheckPath: /health
-    envVars:
-      - key: APP_PASSWORD
-        sync: false
