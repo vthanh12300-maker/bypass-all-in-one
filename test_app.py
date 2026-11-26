@@ -41,4 +41,25 @@ class RouteTests(unittest.TestCase):
             server.server_close()
             thread.join(3)
 
+class AutoTests(unittest.TestCase):
+    def test_refresh(self):
+        self.assertEqual(app.refresh_target("0; URL='https://example.org/a'"),'https://example.org/a')
+        self.assertIsNone(app.refresh_target('hello'))
+        parser=app.RefreshParser()
+        parser.feed('<meta http-equiv="refresh" content="0;url=/next">')
+        self.assertEqual(parser.destination,'/next')
+    def test_platform(self):
+        self.assertEqual(app.platform('https://toplinks.io/a'),'TopLinks')
+        self.assertEqual(app.platform('https://toplinks.io.example.com/a'),'toplinks.io.example.com')
+    @patch('app.crowd_lookup')
+    @patch('app.response_headers',return_value=(403,None))
+    def test_opt_in(self,_,lookup):
+        self.assertEqual(app.resolve_auto('https://toplinks.io/a')['status'],'manual')
+        lookup.assert_not_called()
+        lookup.return_value={'status':'candidate','url':'https://example.org/a'}
+        self.assertEqual(app.resolve_auto('https://toplinks.io/a',True)['status'],'candidate')
+    @patch('app.public_ip')
+    def test_private_query_not_shared(self,ip):
+        self.assertIsNone(app.crowd_lookup('https://example.com/a?token=secret'))
+        ip.assert_not_called()
 if __name__=='__main__': unittest.main()
