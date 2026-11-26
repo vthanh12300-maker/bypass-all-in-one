@@ -107,8 +107,9 @@ class V4CodeTests(unittest.TestCase):
     @patch('app.api_ready',return_value=True)
     @patch('app.ALLOW_CODE',True)
     @patch('app.validate_public_url')
+    @patch('app.preflight_code',return_value={'status':'ready','brand':'toplinks','workflow':{}})
     @patch('app.sdk_request',return_value={'status':'resolved','code':'00123'})
-    def test_exact_code_and_destination(self,sdk,validate,ready):
+    def test_exact_code_and_destination(self,sdk,preflight,validate,ready):
         r=app.request_code('https://toplinks.io/a',destination='https://example.org/task',consent=True)
         sdk.assert_called_once_with('https://example.org/task','code','toplinks')
         self.assertEqual(r['code'],'00123')
@@ -122,9 +123,30 @@ class V4CodeTests(unittest.TestCase):
     @patch('app.api_ready',return_value=True)
     @patch('app.ALLOW_CODE',True)
     @patch('app.validate_public_url')
+    @patch('app.preflight_code',return_value={'status':'ready','brand':'ontops','workflow':{}})
     @patch('app.sdk_request',return_value={'status':'resolved','url':'https://example.org'})
-    def test_url_not_code(self,sdk,validate,ready):
+    def test_url_not_code(self,sdk,preflight,validate,ready):
         r=app.request_code('https://ontops.link/a',consent=True)
         self.assertEqual(r['status'],'manual')
         self.assertNotIn('code',r)
+class V5Tests(unittest.TestCase):
+    @patch('app.PASSWORD','')
+    @patch('app.API_URL','https://example.org')
+    @patch('app.API_KEY','test-key')
+    def test_public_no_provider_spend(self):
+        self.assertFalse(app.capability()['locked'])
+        self.assertFalse(app.api_ready())
+    @patch('app.api_ready',return_value=True)
+    @patch('app.ALLOW_CODE',True)
+    @patch('app.workflow_metadata',return_value={'name':'ontops','maintenance':True,'price':100,'code_ttl_seconds':60,'has_captcha':False,'is_support_free':False})
+    def test_maintenance(self,metadata,ready):
+        self.assertEqual(app.preflight_code('https://ontops.link/a')['status'],'manual')
+    @patch('app.api_ready',return_value=True)
+    @patch('app.ALLOW_CODE',True)
+    @patch('app.workflow_metadata',return_value={'name':'ontops-dr','maintenance':False,'price':100,'code_ttl_seconds':60,'has_captcha':False,'is_support_free':False})
+    def test_mismatch(self,metadata,ready):
+        self.assertEqual(app.preflight_code('https://ontops.link/a','toplinks')['status'],'manual')
+    def test_error_mapping(self):
+        class DailyViewLimitError(Exception): pass
+        self.assertIn('hạn mức',app.provider_error(DailyViewLimitError()))
 if __name__=='__main__': unittest.main()
