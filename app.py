@@ -1,11 +1,19 @@
 import os, json, socket, ssl, http.client, ipaddress, hmac, threading, time
-from urllib.parse import urlsplit, urljoin, urlunsplit
+from urllib.parse import urlsplit, urljoin, urlunsplit, urlencode
+from html.parser import HTMLParser
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 ROOT = Path(__file__).parent
 BRANDS = {'ontops':'Ontops','ontops-dr':'Ontops DR','link4m':'Link4M','funlink':'FunLink','toplinks':'TopLinks','gtraffic':'GTraffic','gtraffic-dr':'GTraffic DR','layma':'LayMa'}
+VERSION = '2.0'
 SLOTS = threading.BoundedSemaphore(2)
+DOMAIN_BRANDS = {'toplinks.io':'TopLinks','ontops.link':'Ontops','link4m.com':'Link4M','funlink.io':'FunLink','yeumoney.com':'YeuMoney','yeulink.com':'YeuLink','synurl.com':'SynURL','linktot.net':'LinkTot','gtraffic.io':'GTraffic','layma.net':'LayMa','linkvertise.com':'Linkvertise','lootlabs.gg':'LootLabs','loot-link.com':'LootLabs','work.ink':'Work.ink','adf.ly':'AdFly'}
+def platform(url):
+    _,host=parse_url(url)
+    return next((name for domain,name in DOMAIN_BRANDS.items() if host==domain or host.endswith('.'+domain)),host)
+
 PASSWORD = os.environ.get('APP_PASSWORD','')
 API_URL = os.environ.get('BYPASS_BASE_URL','')
 API_KEY = os.environ.get('BYPASS_API_KEY','')
@@ -45,6 +53,20 @@ class PinnedHTTPS(http.client.HTTPSConnection):
         try: self.sock=self._context.wrap_socket(raw,server_hostname=self.host)
         except Exception: raw.close(); raise
 
+class RefreshParser(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.destination=None
+    def handle_starttag(self,tag,attrs):
+        if tag!='meta' or self.destination: return
+        attrs=dict(attrs)
+        if (attrs.get('http-equiv') or '').strip().lower()!='refresh': return
+        self.destination=refresh_target(attrs.get('content') or '')
+def refresh_target(value):
+    if not value: return None
+    match=re.match(r"""^\s*\d+(?:\.\d+)?\s*;\s*url\s*=\s*(.+?)\s*$""",value,re.I)
+    return match.group(1).strip().strip('"\'') if match else None
+
 def response_headers(url,timeout):
     u,host=parse_url(url); port=443 if u.scheme=='https' else 80
     ip=public_ip(host,port)
@@ -54,7 +76,16 @@ def response_headers(url,timeout):
     try:
         conn.request('GET',target,headers={'User-Agent':'LinkInspector/1.0','Accept':'text/html,*/*;q=0.1','Connection':'close'})
         res=conn.getresponse()
-        return res.status,res.getheader('Location')
+        location=res.getheader('Location')
+        if 200<=res.status<300:
+            # Only follow explicitly published refresh instructions, never arbitrary script.
+            location=refresh_target(res.getheader('Refresh'))
+            if not location and 'text/html' in (res.getheader('Content-Type') or '').lower():
+                parser=RefreshParser()
+                parser.feed(res.read(65536).decode('utf-8',errors='replace'))
+                location=parser.destination
+            if location: return 302,location
+        return res.status,location
     finally: conn.close()
 
 def resolve_redirect(url):
@@ -69,8 +100,45 @@ def resolve_redirect(url):
             url=urljoin(url,location); continue
         if len(chain)>1 and 200<=status<300:
             return {'status':'resolved','url':url,'chain':chain,'message':'Đã tìm được đích chuyển hướng HTTP. Chưa xác minh nội dung trang đích.'}
-        return {'status':'manual','url':url,'chain':chain,'message':f'HTTP {status}: chưa xác nhận được đích cuối. Có thể cần thao tác trên trang hoặc API riêng.'}
+        return {'status':'manual','url':url,'chain':chain,'http_status':status,'message':('Máy chủ đích từ chối truy cập (HTTP '+str(status)+'). Cần mở link gốc trên trình duyệt hoặc API được cấu hình.' if status in (401,403,429) else f'HTTP {status}: chưa xác nhận được đích cuối. Có thể cần thao tác trên trang hoặc API riêng.')}
     return {'status':'manual','url':url,'chain':chain,'message':'Đã đạt giới hạn chuyển hướng; chưa xác nhận đích cuối.'}
+
+def crowd_lookup(url):
+    u,host=parse_url(url)
+    # Do not send private query parameters, credentials or fragments to a shared service.
+    if u.query or u.fragment or not u.path.strip('/'): return None
+    public_ip(host,443 if u.scheme=='https' else 80)
+    server='crowd.fastforward.team'
+    conn=PinnedHTTPS(server,public_ip(server,443),443,7)
+    try:
+        body=urlencode({'domain':host,'path':u.path.lstrip('/')})
+        conn.request('POST','/crowd/query_v1',body=body,headers={'Content-Type':'application/x-www-form-urlencoded','Accept':'text/plain','Connection':'close','User-Agent':'LinkInspector/2.0'})
+        res=conn.getresponse()
+        # 201 requires user verification; respect that instead of retrying.
+        if res.status!=200: return None
+        target=res.read(4097).decode('utf-8').strip()
+        if not target or len(target)>4096: return None
+        if '://' not in target: target='https://'+target
+        t,h=parse_url(target)
+        public_ip(h,443 if t.scheme=='https' else 80)
+        if target==url: return None
+        return {'status':'candidate','url':target,'provider':'FastForward Crowd','message':'Đích do cộng đồng cung cấp, chưa xác minh. Kiểm tra trước khi mở.'}
+    finally: conn.close()
+
+def resolve_auto(url,share=False):
+    result=resolve_redirect(url)
+    result['platform']=platform(url)
+    if result['status']=='resolved': return result
+    if share:
+        try:
+            candidate=crowd_lookup(url)
+            if candidate:
+                candidate['platform']=result['platform']
+                return candidate
+        except (OSError,ValueError,LinkError,http.client.HTTPException):
+            pass
+        result['message']+=' Không tìm được kết quả từ cơ sở dữ liệu cộng đồng.'
+    return result
 
 def sdk_request(url,mode,brand):
     if not (API_URL and API_KEY and PASSWORD): raise LinkError('Chưa cấu hình API nhà cung cấp và mật khẩu ứng dụng.')
@@ -100,8 +168,8 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
     def do_GET(self):
         route=urlsplit(self.path).path or '/'
-        if route=='/health': return self.send(200,{'ok':True})
-        if route=='/api/config': return self.send(200,{'api':bool(API_URL and API_KEY and PASSWORD),'brands':BRANDS,'locked':bool(PASSWORD)})
+        if route=='/health': return self.send(200,{'ok':True,'version':VERSION})
+        if route=='/api/config': return self.send(200,{'api':bool(API_URL and API_KEY and PASSWORD),'brands':BRANDS,'locked':bool(PASSWORD),'version':VERSION,'crowd':True})
         files={'/':('index.html','text/html; charset=utf-8'),'/index.html':('index.html','text/html; charset=utf-8'),'/app.js':('app.js','text/javascript; charset=utf-8')}
         if route in files:
             path,ctype=files[route]; return self.send(200,(ROOT/'static'/path).read_bytes(),ctype)
@@ -114,10 +182,10 @@ class Handler(BaseHTTPRequestHandler):
             size=int(self.headers.get('Content-Length','0'))
             if not 0<size<=8192: return self.send(400,{'message':'Dữ liệu không hợp lệ.'})
             if self.headers.get('Content-Type','').split(';')[0]!='application/json': return self.send(415,{'message':'Yêu cầu JSON.'})
-            data=json.loads(self.rfile.read(size)); url=data.get('url','').strip(); mode=data.get('mode','redirect')
+            data=json.loads(self.rfile.read(size)); url=data.get('url','').strip(); mode=data.get('mode','auto')
             parse_url(url)
-            if mode not in ('redirect','sdk','code'): raise LinkError('Chế độ không hợp lệ.')
-            result=resolve_redirect(url) if mode=='redirect' else sdk_request(url,mode,data.get('brand'))
+            if mode not in ('auto','redirect','sdk','code'): raise LinkError('Chế độ không hợp lệ.')
+            result=resolve_auto(url,data.get('share') is True) if mode=='auto' else resolve_redirect(url) if mode=='redirect' else sdk_request(url,mode,data.get('brand'))
             self.send(200,result)
         except LinkError as e: self.send(400,{'status':'error','message':str(e)})
         except (ValueError,AttributeError,TypeError): self.send(400,{'status':'error','message':'Dữ liệu không hợp lệ.'})
