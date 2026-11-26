@@ -8,14 +8,14 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 BRANDS = {'ontops':'Ontops','ontops-dr':'Ontops DR','link4m':'Link4M','funlink':'FunLink','toplinks':'TopLinks','gtraffic':'GTraffic','gtraffic-dr':'GTraffic DR','layma':'LayMa'}
-VERSION = '4.0'
+VERSION = '5.0'
 SLOTS = threading.BoundedSemaphore(2)
 DOMAIN_BRANDS = {'toplinks.io':'TopLinks','ontops.link':'Ontops','link4m.com':'Link4M','funlink.io':'FunLink','yeumoney.com':'YeuMoney','yeulink.com':'YeuLink','synurl.com':'SynURL','linktot.net':'LinkTot','gtraffic.io':'GTraffic','layma.net':'LayMa','linkvertise.com':'Linkvertise','lootlabs.gg':'LootLabs','loot-link.com':'LootLabs','work.ink':'Work.ink','adf.ly':'AdFly'}
 def platform(url):
     _,host=parse_url(url)
     return next((name for domain,name in DOMAIN_BRANDS.items() if host==domain or host.endswith('.'+domain)),host)
 
-PASSWORD = os.environ.get('APP_PASSWORD','')
+PASSWORD = os.environ.get('PROVIDER_PASSWORD','')
 API_URL = os.environ.get('BYPASS_BASE_URL','')
 API_KEY = os.environ.get('BYPASS_API_KEY','')
 ALLOW_CODE = os.environ.get('ALLOW_CODE_API','0')=='1'
@@ -24,10 +24,11 @@ def detect_code_brand(url):
     return next((key for key,label in BRANDS.items() if label.lower()==name),None)
 
 def api_ready():
+    # Public mode never spends the owner's provider balance without a separate gate.
     return bool(API_URL and API_KEY and PASSWORD)
 def capability():
     return {'version':VERSION,'api':api_ready(),'code':api_ready() and ALLOW_CODE,
-            'brands':BRANDS,'locked':bool(PASSWORD),'crowd':True,'manual_browser':True,'code_brands':{domain:detect_code_brand('https://'+domain) for domain in DOMAIN_BRANDS},'browser':browser_probe.configured()}
+            'brands':BRANDS,'locked':False,'provider_locked':bool(PASSWORD),'crowd':True,'manual_browser':True,'code_brands':{domain:detect_code_brand('https://'+domain) for domain in DOMAIN_BRANDS},'browser':browser_probe.configured()}
 
 
 class LinkError(Exception): pass
@@ -179,10 +180,62 @@ def validate_public_url(url):
     u,host=parse_url(url)
     public_ip(host,443 if u.scheme=='https' else 80)
 
+def provider_error(exc):
+    name=type(exc).__name__
+    messages={'WorkflowMaintenanceError':'Nền tảng đang bảo trì.',
+              'UnsupportedUrlError':'API chưa hỗ trợ URL này.',
+              'UnsafeUrlError':'API từ chối URL không an toàn.',
+              'CodeExhaustedError':'Nhà cung cấp hiện hết mã.',
+              'DailyViewLimitError':'Đã hết hạn mức trong ngày.',
+              'InvalidLinkError':'Link không hợp lệ hoặc đã bị xóa.',
+              'KeywordExhaustedError':'Nhà cung cấp đã hết lượt xử lý từ khóa.'}
+    status=getattr(exc,'status_code',None)
+    if status in (401,402,403,429):
+        return {401:'API key không hợp lệ hoặc đã thu hồi.',402:'Số dư API không đủ.',403:'API từ chối quyền truy cập.',429:'API giới hạn lượt gọi.'}[status]
+    return messages.get(name,'API không trả kết quả. Kiểm tra kết nối hoặc hạn mức; không tự thử lại.')
+
+def workflow_metadata(url):
+    validate_public_url(url)
+    from bypass_vuotlink_sdk import BypassVuotLink
+    with BypassVuotLink(base_url=API_URL,api_key=API_KEY,timeout=12.0) as client:
+        w=client.check_workflow(url)
+        return {'name':str(getattr(w,'name','') or '').lower(),
+                'maintenance':bool(getattr(w,'maintenance',False)),
+                'price':getattr(w,'price',None),
+                'code_ttl_seconds':getattr(w,'code_ttl_seconds',None),
+                'has_captcha':bool(getattr(w,'has_captcha',False)),
+                'is_support_free':getattr(w,'is_support_free',None)}
+
+def preflight_code(url,brand=None):
+    selected=detect_code_brand(url) if brand in (None,'','auto') else brand
+    result={'kind':'code_preflight','brand':selected,'platform':BRANDS.get(selected,platform(url)),
+            'status':'manual','message':'Chưa cấu hình API nhận mã. Không phát sinh phí.'}
+    if not api_ready() or not ALLOW_CODE:
+        return result
+    try:
+        meta=workflow_metadata(url)
+    except Exception as exc:
+        return dict(result,message=provider_error(exc))
+    actual=meta['name']
+    if actual in BRANDS:
+        if selected and selected!=actual:
+            return dict(result,message='Nền tảng đã chọn không khớp dữ liệu nhà cung cấp.',workflow=meta)
+        selected=actual
+    if selected not in BRANDS:
+        return dict(result,message='Không nhận diện được nền tảng nhận mã.',workflow=meta)
+    if meta['maintenance']:
+        return dict(result,brand=selected,platform=BRANDS[selected],message='Nền tảng đang bảo trì.',workflow=meta)
+    return dict(result,status='ready',brand=selected,platform=BRANDS[selected],workflow=meta,
+                message='Đã đọc metadata workflow; giá workflow không phải báo giá chắc chắn của Fetch Code.')
+
 def request_code(url,brand=None,destination=None,consent=False):
     started=time.monotonic()
     if brand in (None,'','auto'):
         brand=detect_code_brand(url)
+        if not brand and api_ready() and ALLOW_CODE:
+            if not consent: raise LinkError('Cần xác nhận hạn mức trước khi lấy mã.')
+            pre=preflight_code(url)
+            if pre.get('status')=='ready': brand=pre['brand']
     if brand not in BRANDS:
         return {'status':'manual','kind':'code','message':'Chọn nền tảng lấy mã phù hợp; chưa nhận diện được từ URL.','original_url':url}
     result={'status':'manual','kind':'code','platform':BRANDS[brand],'original_url':url}
@@ -192,13 +245,17 @@ def request_code(url,brand=None,destination=None,consent=False):
         raise LinkError('Cần xác nhận hạn mức trước khi lấy mã.')
     target=destination or url
     validate_public_url(target)
+    # The workflow is identified from the short link, not the optional task destination.
+    pre=preflight_code(url,brand)
+    if pre.get('status')!='ready':
+        return dict(result,message=pre['message'],trace=[{'engine':'Workflow','status':'manual'}])
     try:
         received=sdk_request(target,'code',brand)
-    except Exception:
-        return dict(result,message='API chưa trả được mã. Có thể cần URL trang đích của nhiệm vụ hoặc kiểm tra quyền và hạn mức. Không tự thử lại.',trace=[{'engine':'Fetch Code','status':'unavailable'}])
+    except Exception as exc:
+        return dict(result,message=provider_error(exc),trace=[{'engine':'Fetch Code','status':'unavailable'}])
     code=received.get('code')
     if received.get('status')=='resolved' and isinstance(code,str) and code.strip() and len(code)<=200 and not any(ord(ch)<32 for ch in code):
-        return dict(result,status='resolved',code=code,provider='VuotLink API',message='Đã nhận mã từ API; chưa xác minh mã được trang nhiệm vụ chấp nhận.',elapsed_ms=round((time.monotonic()-started)*1000),trace=[{'engine':'Fetch Code','status':'code_received'}])
+        return dict(result,status='resolved',code=code,provider='VuotLink API',workflow=pre.get('workflow'),message='Đã nhận mã từ API; thời hạn workflow chỉ là tham khảo, chưa xác minh mã được trang nhiệm vụ chấp nhận.',elapsed_ms=round((time.monotonic()-started)*1000),trace=[{'engine':'Fetch Code','status':'code_received'}])
     return dict(result,message='API không trả mã. Nếu đang dùng link rút gọn, hãy cung cấp URL trang đích của nhiệm vụ.',trace=[{'engine':'Fetch Code','status':'not_found'}])
 
 def sdk_request(url,mode,brand):
@@ -239,8 +296,8 @@ class Handler(BaseHTTPRequestHandler):
             path,ctype=files[route]; return self.send(200,(ROOT/'static'/path).read_bytes(),ctype)
         self.send(404,{'message':'Không tìm thấy.'})
     def do_POST(self):
-        if urlsplit(self.path).path!='/api/resolve': return self.send(404,{'message':'Không tìm thấy.'})
-        if PASSWORD and not hmac.compare_digest(self.headers.get('X-App-Password','').encode(),PASSWORD.encode()): return self.send(401,{'message':'Mật khẩu ứng dụng không đúng.'})
+        route=urlsplit(self.path).path
+        if route not in ('/api/resolve','/api/code/preflight'): return self.send(404,{'message':'Không tìm thấy.'})
         if not SLOTS.acquire(blocking=False): return self.send(429,{'message':'Đang bận, thử lại sau.'})
         try:
             size=int(self.headers.get('Content-Length','0'))
@@ -248,6 +305,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get('Content-Type','').split(';')[0]!='application/json': return self.send(415,{'message':'Yêu cầu JSON.'})
             data=json.loads(self.rfile.read(size)); url=data.get('url','').strip(); mode=data.get('mode','auto')
             parse_url(url)
+            uses_provider=(route=='/api/code/preflight' or mode in ('sdk','code','browser') or (mode=='auto' and data.get('provider') is True))
+            if uses_provider and PASSWORD and not hmac.compare_digest(self.headers.get('X-Provider-Password','').encode(),PASSWORD.encode()):
+                return self.send(401,{'status':'error','message':'API riêng yêu cầu xác thực; chế độ miễn phí không cần mật khẩu.'})
+            if route=='/api/code/preflight':
+                return self.send(200,preflight_code(url,data.get('brand')))
             if mode not in ('auto','redirect','sdk','code','browser'): raise LinkError('Chế độ không hợp lệ.')
             if mode=='code':
                 destination=data.get('destination') or None
