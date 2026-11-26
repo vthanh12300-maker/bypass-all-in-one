@@ -7,7 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).parent
 BRANDS = {'ontops':'Ontops','ontops-dr':'Ontops DR','link4m':'Link4M','funlink':'FunLink','toplinks':'TopLinks','gtraffic':'GTraffic','gtraffic-dr':'GTraffic DR','layma':'LayMa'}
-VERSION = '2.0'
+VERSION = '3.0'
 SLOTS = threading.BoundedSemaphore(2)
 DOMAIN_BRANDS = {'toplinks.io':'TopLinks','ontops.link':'Ontops','link4m.com':'Link4M','funlink.io':'FunLink','yeumoney.com':'YeuMoney','yeulink.com':'YeuLink','synurl.com':'SynURL','linktot.net':'LinkTot','gtraffic.io':'GTraffic','layma.net':'LayMa','linkvertise.com':'Linkvertise','lootlabs.gg':'LootLabs','loot-link.com':'LootLabs','work.ink':'Work.ink','adf.ly':'AdFly'}
 def platform(url):
@@ -17,6 +17,13 @@ def platform(url):
 PASSWORD = os.environ.get('APP_PASSWORD','')
 API_URL = os.environ.get('BYPASS_BASE_URL','')
 API_KEY = os.environ.get('BYPASS_API_KEY','')
+ALLOW_CODE = os.environ.get('ALLOW_CODE_API','0')=='1'
+def api_ready():
+    return bool(API_URL and API_KEY and PASSWORD)
+def capability():
+    return {'version':VERSION,'api':api_ready(),'code':api_ready() and ALLOW_CODE,
+            'brands':BRANDS,'locked':bool(PASSWORD),'crowd':True,'manual_browser':True}
+
 
 class LinkError(Exception): pass
 
@@ -125,27 +132,51 @@ def crowd_lookup(url):
         return {'status':'candidate','url':target,'provider':'FastForward Crowd','message':'Đích do cộng đồng cung cấp, chưa xác minh. Kiểm tra trước khi mở.'}
     finally: conn.close()
 
-def resolve_auto(url,share=False):
+def resolve_auto(url,share=False,provider=False):
+    started=time.monotonic()
+    trace=[]
     result=resolve_redirect(url)
     result['platform']=platform(url)
-    if result['status']=='resolved': return result
-    if share:
+    trace.append({'engine':'HTTP / HTML','status':result['status'],'http_status':result.get('http_status')})
+    if result['status']!='resolved' and share:
         try:
             candidate=crowd_lookup(url)
+            trace.append({'engine':'FastForward','status':'candidate' if candidate else 'not_found'})
             if candidate:
                 candidate['platform']=result['platform']
-                return candidate
+                result=candidate
+            else:
+                result['message']+=' Không có đích tham khảo từ cộng đồng.'
         except (OSError,ValueError,LinkError,http.client.HTTPException):
-            pass
-        result['message']+=' Không tìm được kết quả từ cơ sở dữ liệu cộng đồng.'
+            trace.append({'engine':'FastForward','status':'unavailable'})
+            result['message']+=' Dịch vụ cộng đồng không phản hồi.'
+    if result['status']=='manual' and provider:
+        if not api_ready():
+            trace.append({'engine':'API miễn phí','status':'not_configured'})
+        else:
+            try:
+                other=sdk_request(url,'sdk',None)
+                trace.append({'engine':'API miễn phí','status':other['status']})
+                if other['status']=='resolved':
+                    result=other
+                else:
+                    result['message']+=' API: '+other.get('message','Chưa hoàn tất.')
+            except Exception:
+                trace.append({'engine':'API miễn phí','status':'unavailable'})
+                result['message']+=' API không khả dụng hoặc cần xác minh.'
+    result['platform']=platform(url)
+    result['trace']=trace
+    result['elapsed_ms']=round((time.monotonic()-started)*1000)
+    result['original_url']=url
     return result
 
 def sdk_request(url,mode,brand):
-    if not (API_URL and API_KEY and PASSWORD): raise LinkError('Chưa cấu hình API nhà cung cấp và mật khẩu ứng dụng.')
+    if not api_ready(): raise LinkError('Chưa cấu hình API nhà cung cấp và mật khẩu ứng dụng.')
     u,host=parse_url(url); public_ip(host,443 if u.scheme=='https' else 80)
     from bypass_vuotlink_sdk import BypassVuotLink
     with BypassVuotLink(base_url=API_URL,api_key=API_KEY,timeout=55.0) as client:
         if mode=='code':
+            if not ALLOW_CODE: raise LinkError('API lấy mã chưa được chủ hosting cho phép sử dụng; có thể phát sinh phí.')
             if brand not in BRANDS: raise LinkError('Chọn đúng nền tảng lấy mã.')
             result=client.fetch_code(url,brand,source='live')
             code=getattr(result,'code',None)
@@ -153,8 +184,10 @@ def sdk_request(url,mode,brand):
             return {'status':'resolved','code':str(code),'message':'API đã trả mã; chưa xác minh việc sử dụng mã.'}
         result=client.resolve(url,max_hops=5,is_free=True,auto_solve_captcha=False)
         final=getattr(result,'final_url',None)
-        if final: parse_url(final)
-        partial=getattr(result,'hops_exceeded',False) or getattr(result,'free_interrupted',False) or not final or final==url
+        if final:
+            dest,host=parse_url(final)
+            public_ip(host,443 if dest.scheme=='https' else 80)
+        partial=getattr(result,'hops_exceeded',False) or getattr(result,'free_interrupted',False) or not final or final==url or getattr(result,'status_code',200) in (401,403,429)
         return {'status':'manual' if partial else 'resolved','url':final,'message':'Chưa hoàn tất; cần thao tác hoặc nền tảng không hỗ trợ miễn phí.' if partial else 'API trả về link đích.','provider':str(getattr(result,'workflow','') or '')}
 
 class Handler(BaseHTTPRequestHandler):
@@ -169,7 +202,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         route=urlsplit(self.path).path or '/'
         if route=='/health': return self.send(200,{'ok':True,'version':VERSION})
-        if route=='/api/config': return self.send(200,{'api':bool(API_URL and API_KEY and PASSWORD),'brands':BRANDS,'locked':bool(PASSWORD),'version':VERSION,'crowd':True})
+        if route=='/api/config': return self.send(200,capability())
         files={'/':('index.html','text/html; charset=utf-8'),'/index.html':('index.html','text/html; charset=utf-8'),'/app.js':('app.js','text/javascript; charset=utf-8')}
         if route in files:
             path,ctype=files[route]; return self.send(200,(ROOT/'static'/path).read_bytes(),ctype)
@@ -185,7 +218,7 @@ class Handler(BaseHTTPRequestHandler):
             data=json.loads(self.rfile.read(size)); url=data.get('url','').strip(); mode=data.get('mode','auto')
             parse_url(url)
             if mode not in ('auto','redirect','sdk','code'): raise LinkError('Chế độ không hợp lệ.')
-            result=resolve_auto(url,data.get('share') is True) if mode=='auto' else resolve_redirect(url) if mode=='redirect' else sdk_request(url,mode,data.get('brand'))
+            result=resolve_auto(url,data.get('share') is True,data.get('provider') is True) if mode=='auto' else resolve_redirect(url) if mode=='redirect' else sdk_request(url,mode,data.get('brand'))
             self.send(200,result)
         except LinkError as e: self.send(400,{'status':'error','message':str(e)})
         except (ValueError,AttributeError,TypeError): self.send(400,{'status':'error','message':'Dữ liệu không hợp lệ.'})
