@@ -2,6 +2,7 @@ import os, json, socket, ssl, http.client, ipaddress, hmac, threading, time
 from urllib.parse import urlsplit, urljoin, urlunsplit, urlencode
 from html.parser import HTMLParser
 import re
+import browser_probe
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -22,7 +23,7 @@ def api_ready():
     return bool(API_URL and API_KEY and PASSWORD)
 def capability():
     return {'version':VERSION,'api':api_ready(),'code':api_ready() and ALLOW_CODE,
-            'brands':BRANDS,'locked':bool(PASSWORD),'crowd':True,'manual_browser':True}
+            'brands':BRANDS,'locked':bool(PASSWORD),'crowd':True,'manual_browser':True,'browser':browser_probe.configured()}
 
 
 class LinkError(Exception): pass
@@ -170,6 +171,10 @@ def resolve_auto(url,share=False,provider=False):
     result['original_url']=url
     return result
 
+def validate_public_url(url):
+    u,host=parse_url(url)
+    public_ip(host,443 if u.scheme=='https' else 80)
+
 def sdk_request(url,mode,brand):
     if not api_ready(): raise LinkError('Chưa cấu hình API nhà cung cấp và mật khẩu ứng dụng.')
     u,host=parse_url(url); public_ip(host,443 if u.scheme=='https' else 80)
@@ -217,8 +222,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.headers.get('Content-Type','').split(';')[0]!='application/json': return self.send(415,{'message':'Yêu cầu JSON.'})
             data=json.loads(self.rfile.read(size)); url=data.get('url','').strip(); mode=data.get('mode','auto')
             parse_url(url)
-            if mode not in ('auto','redirect','sdk','code'): raise LinkError('Chế độ không hợp lệ.')
-            result=resolve_auto(url,data.get('share') is True,data.get('provider') is True) if mode=='auto' else resolve_redirect(url) if mode=='redirect' else sdk_request(url,mode,data.get('brand'))
+            if mode not in ('auto','redirect','sdk','code','browser'): raise LinkError('Chế độ không hợp lệ.')
+            if mode=='code' and data.get('accept_cost') is not True: raise LinkError('Cần xác nhận hạn mức trước khi lấy mã.')
+            result=resolve_auto(url,data.get('share') is True,data.get('provider') is True) if mode=='auto' else resolve_redirect(url) if mode=='redirect' else browser_probe.probe(url,validate_public_url) if mode=='browser' else sdk_request(url,mode,data.get('brand'))
             self.send(200,result)
         except LinkError as e: self.send(400,{'status':'error','message':str(e)})
         except (ValueError,AttributeError,TypeError): self.send(400,{'status':'error','message':'Dữ liệu không hợp lệ.'})
